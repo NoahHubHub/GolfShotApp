@@ -1,68 +1,93 @@
 // ShotCaptureView.swift
 // GolfShotApp
 //
-// Live camera view with ball-tracking overlay and recording controls.
+// Live camera view with automatic ball detection, visual tracking overlay,
+// and fully automatic shot detection + recording.
 
 import SwiftUI
 import AVFoundation
 import Vision
+import AudioToolbox
+
+// MARK: - CaptureState
+
+enum CaptureState: Equatable {
+    case searching      // Camera running, looking for ball
+    case ballDetected   // Ball found but not yet stable
+    case ballLocked     // Ball stable ≥ 1 s → ready to hit
+    case shooting       // Ball hit, tracking trajectory + recording
+    case processing     // Analysis running
+    case done           // Results ready
+}
 
 // MARK: - ShotCaptureView
 
 struct ShotCaptureView: View {
 
     @StateObject private var cameraManager = CameraManager()
+    @StateObject private var ballDetector  = BallDetector()
     @StateObject private var ballTracker   = BallTracker()
     @EnvironmentObject var store: ShotStore
 
-    @State private var selectedClub: Club  = .driver
-    @State private var showClubSelector    = false
-    @State private var captureState: CaptureState = .ready
+    @State private var selectedClub: Club       = .driver
+    @State private var showClubSelector         = false
+    @State private var captureState: CaptureState = .searching
     @State private var finishedShot: Shot?
-    @State private var showResult          = false
-    @State private var countdownValue: Int = 3
-    @State private var autoRecordEnabled   = true
-
-    enum CaptureState {
-        case ready, armed, recording, processing, done
-    }
+    @State private var showResult               = false
+    @State private var readyPulse: CGFloat      = 1.0
 
     var body: some View {
         ZStack {
-            // Camera preview
             CameraPreviewView(session: cameraManager.session)
                 .ignoresSafeArea()
 
-            // Tracking overlay
-            TrackingOverlayView(ballTracker: ballTracker)
-                .ignoresSafeArea()
+            DetectionOverlayView(
+                ballDetector: ballDetector,
+                ballTracker:  ballTracker,
+                captureState: captureState
+            )
+            .ignoresSafeArea()
 
-            // UI overlays
             VStack {
                 topBar
                 Spacer()
-                bottomBar
+                if captureState == .ballLocked {
+                    readyBanner
+                }
+                Spacer()
+                statusBar
+            }
+        }
+        .onChange(of: ballDetector.isBallVisible) { visible in
+            guard captureState == .searching || captureState == .ballDetected else { return }
+            withAnimation(.easeInOut(duration: 0.25)) {
+                captureState = visible ? .ballDetected : .searching
+            }
+        }
+        .onChange(of: ballDetector.isLocked) { locked in
+            if locked && captureState == .ballDetected {
+                withAnimation(.spring()) { captureState = .ballLocked }
+                armTracker()
+            } else if !locked && captureState == .ballLocked {
+                withAnimation { captureState = .ballDetected }
+                disarmTracker()
             }
         }
         .onAppear(perform: onAppear)
         .onDisappear(perform: onDisappear)
         .sheet(isPresented: $showClubSelector) {
-            ClubSelectorView(selectedClub: $selectedClub, onDismiss: { showClubSelector = false })
+            ClubSelectorView(selectedClub: $selectedClub,
+                             onDismiss: { showClubSelector = false })
         }
         .sheet(isPresented: $showResult) {
             if let shot = finishedShot {
                 NavigationView {
                     ShotResultView(shot: shot, onDone: {
                         showResult = false
-                        resetCapture()
+                        resetToSearching()
                     })
                 }
             }
-        }
-        .alert("Permission Required", isPresented: .constant(cameraManager.error != nil)) {
-            Button("OK") {}
-        } message: {
-            Text(cameraManager.error ?? "")
         }
     }
 
@@ -70,81 +95,80 @@ struct ShotCaptureView: View {
 
     private var topBar: some View {
         HStack {
-            // Club selector button
-            Button {
-                showClubSelector = true
-            } label: {
+            Button { showClubSelector = true } label: {
                 HStack(spacing: 6) {
                     Text(selectedClub.emoji)
-                    Text(selectedClub.rawValue)
-                        .fontWeight(.semibold)
-                    Image(systemName: "chevron.down")
-                        .font(.caption)
+                    Text(selectedClub.rawValue).fontWeight(.semibold)
+                    Image(systemName: "chevron.down").font(.caption)
                 }
                 .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 14).padding(.vertical, 8)
                 .background(Capsule().fill(.black.opacity(0.5)))
             }
-
             Spacer()
-
-            // Auto-record toggle
-            Toggle(isOn: $autoRecordEnabled) {
-                Text("Auto")
-                    .font(.caption)
-                    .foregroundColor(.white)
-            }
-            .toggleStyle(SwitchToggleStyle(tint: Color("GolfGreen")))
-            .fixedSize()
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Capsule().fill(.black.opacity(0.5)))
-
-            Spacer()
-
-            // Status indicator
-            statusBadge
+            stateBadge
         }
         .padding(.horizontal)
         .padding(.top, 8)
     }
 
-    private var statusBadge: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-            Text(statusText)
-                .font(.caption)
-                .fontWeight(.semibold)
-                .foregroundColor(.white)
+    private var stateBadge: some View {
+        HStack(spacing: 6) {
+            Circle().fill(stateColor).frame(width: 8, height: 8)
+            Text(stateLabelText)
+                .font(.caption).fontWeight(.semibold).foregroundColor(.white)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(.black.opacity(0.5)))
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(Capsule().fill(.black.opacity(0.55)))
     }
 
-    // MARK: - Bottom Bar
+    // MARK: - Ready Banner
 
-    private var bottomBar: some View {
-        VStack(spacing: 12) {
-            // Live metrics strip (during tracking)
-            if captureState == .recording || captureState == .armed {
-                liveMetricsStrip
+    private var readyBanner: some View {
+        Text("⛳ JETZT SCHLAGEN!")
+            .font(.system(size: 26, weight: .black, design: .rounded))
+            .foregroundColor(.white)
+            .padding(.horizontal, 28).padding(.vertical, 14)
+            .background(
+                Capsule()
+                    .fill(Color("GolfGreen"))
+                    .shadow(color: Color("GolfGreen").opacity(0.6), radius: 16)
+            )
+            .scaleEffect(readyPulse)
+            .onAppear {
+                // Haptic + sound
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                AudioServicesPlayAlertSound(SystemSoundID(1322))
+                // Pulsing animation
+                withAnimation(
+                    .easeInOut(duration: 0.55).repeatForever(autoreverses: true)
+                ) { readyPulse = 1.07 }
             }
+            .onDisappear { readyPulse = 1.0 }
+    }
 
-            HStack(spacing: 24) {
-                Spacer()
+    // MARK: - Status Bar
 
-                // Main capture button
-                captureButton
+    private var statusBar: some View {
+        VStack(spacing: 10) {
+            Text(instructionText)
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.9))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 36)
 
-                Spacer()
+            if captureState == .done {
+                Button(action: resetToSearching) {
+                    Label("Neuer Schlag", systemImage: "arrow.clockwise.circle.fill")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 28).padding(.vertical, 12)
+                        .background(Capsule().fill(Color("GolfGreen")))
+                }
             }
-            .padding(.bottom, 24)
         }
-        .padding()
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity)
         .background(
             LinearGradient(colors: [.clear, .black.opacity(0.6)],
                            startPoint: .top, endPoint: .bottom)
@@ -152,145 +176,103 @@ struct ShotCaptureView: View {
         )
     }
 
-    private var captureButton: some View {
-        Button(action: handleCaptureButton) {
-            ZStack {
-                Circle()
-                    .fill(.white.opacity(0.15))
-                    .frame(width: 76, height: 76)
-                Circle()
-                    .strokeBorder(.white, lineWidth: 3)
-                    .frame(width: 76, height: 76)
+    // MARK: - State Helpers
 
-                if captureState == .recording {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(.red)
-                        .frame(width: 28, height: 28)
-                } else if captureState == .processing {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                        .scaleEffect(1.3)
-                } else {
-                    Circle()
-                        .fill(Color("GolfGreen"))
-                        .frame(width: 54, height: 54)
-                }
-            }
-        }
-        .disabled(captureState == .processing)
-    }
-
-    private var liveMetricsStrip: some View {
-        HStack(spacing: 20) {
-            LiveMetric(label: "STATE", value: ballTracker.state == .tracking ? "TRACKING" : "DETECTING")
-            if let pos = ballTracker.currentBallPosition {
-                LiveMetric(label: "POS", value: String(format: "%.2f, %.2f", pos.x, pos.y))
-            }
-            LiveMetric(label: "POINTS", value: "\(ballTracker.latestPoints.count)")
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.6)))
-    }
-
-    // MARK: - Status helpers
-
-    private var statusText: String {
+    private var stateLabelText: String {
         switch captureState {
-        case .ready:      return "READY"
-        case .armed:      return "ARMED"
-        case .recording:  return "● REC"
-        case .processing: return "PROCESSING"
-        case .done:       return "DONE"
+        case .searching:    return "SUCHE BALL..."
+        case .ballDetected: return "BALL ERKANNT"
+        case .ballLocked:   return "✓ BEREIT"
+        case .shooting:     return "● AUFNAHME"
+        case .processing:   return "ANALYSE..."
+        case .done:         return "✓ FERTIG"
         }
     }
 
-    private var statusColor: Color {
+    private var stateColor: Color {
         switch captureState {
-        case .ready:      return .white
-        case .armed:      return .yellow
-        case .recording:  return .red
-        case .processing: return .orange
-        case .done:       return Color("GolfGreen")
+        case .searching:    return .white.opacity(0.6)
+        case .ballDetected: return .yellow
+        case .ballLocked:   return Color("GolfGreen")
+        case .shooting:     return .red
+        case .processing:   return .orange
+        case .done:         return Color("GolfGreen")
         }
     }
 
-    // MARK: - Actions
-
-    private func handleCaptureButton() {
+    private var instructionText: String {
         switch captureState {
-        case .ready:
-            armCapture()
-        case .armed:
-            disarm()
-        case .recording:
-            stopAndProcess()
-        case .processing, .done:
-            break
+        case .searching:    return "Ball in den Kamerabereich legen"
+        case .ballDetected: return "Ball erkannt – kurz stillhalten..."
+        case .ballLocked:   return "Ball gesperrt – jetzt schlagen!"
+        case .shooting:     return "Aufnahme läuft..."
+        case .processing:   return "Schlag wird analysiert..."
+        case .done:         return "Analyse abgeschlossen"
         }
     }
 
-    private func armCapture() {
-        captureState = .armed
+    // MARK: - Shot Logic
+
+    private func armTracker() {
         ballTracker.startTracking()
 
-        if autoRecordEnabled {
-            ballTracker.onTrajectoryDetected = { [self] _ in
-                guard captureState == .armed else { return }
-                DispatchQueue.main.async { beginRecording() }
-            }
-        } else {
-            beginRecording()
+        ballTracker.onTrajectoryDetected = { _ in
+            guard captureState == .ballLocked else { return }
+            DispatchQueue.main.async { startRecording() }
         }
-
-        ballTracker.onTrajectoryEnded = { [self] points in
-            guard captureState == .recording else { return }
-            DispatchQueue.main.async { stopAndProcess(finalPoints: points) }
+        ballTracker.onTrajectoryEnded = { points in
+            guard captureState == .shooting else { return }
+            DispatchQueue.main.async { finishShot(trajectoryPoints: points) }
         }
     }
 
-    private func disarm() {
-        captureState = .ready
+    private func disarmTracker() {
         ballTracker.stopTracking()
         ballTracker.onTrajectoryDetected = nil
-        ballTracker.onTrajectoryEnded = nil
+        ballTracker.onTrajectoryEnded    = nil
     }
 
-    private func beginRecording() {
-        guard captureState == .armed else { return }
-        captureState = .recording
+    private func startRecording() {
+        withAnimation { captureState = .shooting }
+        ballDetector.stop()
+
         let filename = "shot_\(UUID().uuidString).mov"
         let url = store.videosDirectory.appendingPathComponent(filename)
         cameraManager.startRecording(to: url)
+
+        // Safety timeout: stop recording after 8 s even if trajectory never ends
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            guard captureState == .shooting else { return }
+            ballTracker.stopTracking()
+        }
     }
 
-    private func stopAndProcess(finalPoints: [CGPoint]? = nil) {
-        captureState = .processing
+    private func finishShot(trajectoryPoints: [CGPoint]) {
+        withAnimation { captureState = .processing }
 
         cameraManager.stopRecording { [self] videoURL in
-            let points = finalPoints ?? []
-            let metrics = ShotAnalyzer.analyze(ballPoints: points, clubName: selectedClub.rawValue)
+            let metrics = ShotAnalyzer.analyze(
+                ballPoints: trajectoryPoints,
+                clubName:   selectedClub.rawValue
+            )
             let shot = Shot(
-                club: selectedClub,
-                metrics: metrics,
-                videoFilename: videoURL?.lastPathComponent,
-                trajectoryPoints: points
+                club:             selectedClub,
+                metrics:          metrics,
+                videoFilename:    videoURL?.lastPathComponent,
+                trajectoryPoints: trajectoryPoints
             )
             store.add(shot: shot)
             finishedShot = shot
             captureState = .done
-            showResult = true
+            showResult   = true
         }
-
-        ballTracker.onTrajectoryDetected = nil
-        ballTracker.onTrajectoryEnded = nil
     }
 
-    private func resetCapture() {
-        captureState = .ready
+    private func resetToSearching() {
+        ballDetector.reset()
+        disarmTracker()
         finishedShot = nil
-        ballTracker.startTracking()
-        ballTracker.stopTracking()
+        withAnimation { captureState = .searching }
     }
 
     // MARK: - Lifecycle
@@ -299,7 +281,8 @@ struct ShotCaptureView: View {
         Task {
             await cameraManager.requestPermissionsAndSetup()
             cameraManager.start()
-            cameraManager.onFrame = { [weak ballTracker] buffer in
+            cameraManager.onFrame = { [weak ballDetector, weak ballTracker] buffer in
+                ballDetector?.process(sampleBuffer: buffer)
                 ballTracker?.process(sampleBuffer: buffer)
             }
         }
@@ -307,26 +290,177 @@ struct ShotCaptureView: View {
 
     private func onDisappear() {
         cameraManager.stop()
-        if captureState == .recording {
+        if captureState == .shooting {
             cameraManager.stopRecording { _ in }
         }
     }
 }
 
-// MARK: - LiveMetric
+// MARK: - DetectionOverlayView
 
-private struct LiveMetric: View {
-    let label: String
-    let value: String
+struct DetectionOverlayView: UIViewRepresentable {
 
-    var body: some View {
-        VStack(spacing: 2) {
-            Text(label)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(.white.opacity(0.6))
-            Text(value)
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundColor(.white)
+    @ObservedObject var ballDetector: BallDetector
+    @ObservedObject var ballTracker:  BallTracker
+    let captureState: CaptureState
+
+    func makeUIView(context: Context) -> OverlayCanvas { OverlayCanvas() }
+
+    func updateUIView(_ view: OverlayCanvas, context: Context) {
+        let trajectoryPts = ballTracker.latestPoints.map {
+            CGPoint(x: $0.x, y: 1 - $0.y)
+        }
+        view.update(
+            detectedBall:      ballDetector.detected,
+            isLocked:          ballDetector.isLocked,
+            trajectoryPoints:  trajectoryPts,
+            captureState:      captureState
+        )
+    }
+
+    // MARK: - Canvas
+
+    final class OverlayCanvas: UIView {
+
+        private let ballRingLayer  = CAShapeLayer()
+        private let ballDotLayer   = CAShapeLayer()
+        private let trailLayer     = CAShapeLayer()
+        private let scanRingLayer  = CAShapeLayer()
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            backgroundColor = .clear
+
+            // Trajectory trail
+            trailLayer.fillColor   = UIColor.clear.cgColor
+            trailLayer.strokeColor = UIColor.systemGreen.cgColor
+            trailLayer.lineWidth   = 2.5
+            trailLayer.lineCap     = .round
+            trailLayer.lineJoin    = .round
+            layer.addSublayer(trailLayer)
+
+            // Scanning ring (searching state)
+            scanRingLayer.fillColor   = UIColor.clear.cgColor
+            scanRingLayer.strokeColor = UIColor.white.withAlphaComponent(0.25).cgColor
+            scanRingLayer.lineWidth   = 1.5
+            scanRingLayer.lineDashPattern = [5, 5]
+            layer.addSublayer(scanRingLayer)
+
+            // Ball detection ring
+            ballRingLayer.fillColor = UIColor.clear.cgColor
+            ballRingLayer.lineWidth = 3
+            layer.addSublayer(ballRingLayer)
+
+            // Ball center dot
+            ballDotLayer.lineWidth = 0
+            layer.addSublayer(ballDotLayer)
+        }
+
+        required init?(coder: NSCoder) { fatalError() }
+
+        // MARK: Update
+
+        func update(detectedBall:     DetectedBall?,
+                    isLocked:         Bool,
+                    trajectoryPoints: [CGPoint],
+                    captureState:     CaptureState) {
+
+            let w = bounds.width
+            let h = bounds.height
+
+            // ── Scanning ring (shown while searching, no ball yet) ──────
+            if captureState == .searching {
+                let cx = w / 2, cy = h / 2
+                let r: CGFloat = min(w, h) * 0.15
+                scanRingLayer.path = UIBezierPath(
+                    ovalIn: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2)
+                ).cgPath
+                if scanRingLayer.animation(forKey: "rotate") == nil {
+                    let rot = CABasicAnimation(keyPath: "transform.rotation")
+                    rot.fromValue  = 0
+                    rot.toValue    = CGFloat.pi * 2
+                    rot.duration   = 3
+                    rot.repeatCount = .infinity
+                    scanRingLayer.add(rot, forKey: "rotate")
+                }
+            } else {
+                scanRingLayer.path = nil
+                scanRingLayer.removeAnimation(forKey: "rotate")
+            }
+
+            // ── Ball detection ring ─────────────────────────────────────
+            let showBallRing = detectedBall != nil &&
+                (captureState == .ballDetected || captureState == .ballLocked || captureState == .searching)
+
+            if showBallRing, let ball = detectedBall {
+                let cx  = ball.center.x * w
+                let cy  = ball.center.y * h
+                // Scale radius up so the ring is clearly visible around the ball
+                let r   = ball.normalizedRadius * w * 3.0
+
+                let ringRect = CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2)
+                ballRingLayer.path = UIBezierPath(ovalIn: ringRect).cgPath
+
+                // Center dot
+                let dotR: CGFloat = 4
+                ballDotLayer.path = UIBezierPath(
+                    ovalIn: CGRect(x: cx - dotR, y: cy - dotR,
+                                  width: dotR * 2, height: dotR * 2)
+                ).cgPath
+
+                if isLocked {
+                    // Green solid ring + pulse animation
+                    ballRingLayer.strokeColor   = UIColor.systemGreen.cgColor
+                    ballRingLayer.lineWidth      = 3.5
+                    ballRingLayer.lineDashPattern = nil
+                    ballDotLayer.fillColor       = UIColor.systemGreen.cgColor
+
+                    if ballRingLayer.animation(forKey: "pulse") == nil {
+                        let pulse          = CABasicAnimation(keyPath: "transform.scale")
+                        pulse.fromValue    = 1.0
+                        pulse.toValue      = 1.18
+                        pulse.duration     = 0.55
+                        pulse.autoreverses = true
+                        pulse.repeatCount  = .infinity
+                        ballRingLayer.add(pulse, forKey: "pulse")
+                        ballDotLayer.add(pulse,  forKey: "pulse")
+                    }
+                } else {
+                    // Yellow dashed ring
+                    ballRingLayer.removeAnimation(forKey: "pulse")
+                    ballDotLayer.removeAnimation(forKey: "pulse")
+                    ballRingLayer.strokeColor    = UIColor.systemYellow.cgColor
+                    ballRingLayer.lineWidth      = 2.5
+                    ballRingLayer.lineDashPattern = [8, 5]
+                    ballDotLayer.fillColor       = UIColor.systemYellow.cgColor
+                }
+            } else {
+                ballRingLayer.path = nil
+                ballDotLayer.path  = nil
+                ballRingLayer.removeAnimation(forKey: "pulse")
+                ballDotLayer.removeAnimation(forKey: "pulse")
+            }
+
+            // ── Trajectory trail ────────────────────────────────────────
+            if trajectoryPoints.count >= 2 &&
+               (captureState == .shooting || captureState == .processing || captureState == .done) {
+
+                let path   = UIBezierPath()
+                let mapped = trajectoryPoints.map { CGPoint(x: $0.x * w, y: $0.y * h) }
+                path.move(to: mapped[0])
+                mapped.dropFirst().forEach { path.addLine(to: $0) }
+                trailLayer.path = path.cgPath
+
+            } else if captureState == .searching || captureState == .ballDetected || captureState == .ballLocked {
+                trailLayer.path = nil
+            }
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            [scanRingLayer, trailLayer, ballRingLayer, ballDotLayer].forEach {
+                $0.frame = bounds
+            }
         }
     }
 }
@@ -339,103 +473,15 @@ struct CameraPreviewView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> PreviewUIView {
         let view = PreviewUIView()
-        view.previewLayer.session = session
+        view.previewLayer.session      = session
         view.previewLayer.videoGravity = .resizeAspectFill
         return view
     }
 
     func updateUIView(_ uiView: PreviewUIView, context: Context) {}
 
-    class PreviewUIView: UIView {
+    final class PreviewUIView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
     }
-}
-
-// MARK: - TrackingOverlayView
-
-struct TrackingOverlayView: UIViewRepresentable {
-
-    @ObservedObject var ballTracker: BallTracker
-
-    func makeUIView(context: Context) -> OverlayUIView {
-        OverlayUIView()
-    }
-
-    func updateUIView(_ uiView: OverlayUIView, context: Context) {
-        uiView.update(
-            points: ballTracker.latestPoints.map { CGPoint(x: $0.x, y: 1 - $0.y) },
-            ballPosition: ballTracker.currentBallPosition,
-            state: ballTracker.state
-        )
-    }
-
-    class OverlayUIView: UIView {
-
-        private let trailLayer = CAShapeLayer()
-        private let ballLayer  = CAShapeLayer()
-
-        override init(frame: CGRect) {
-            super.init(frame: frame)
-            backgroundColor = .clear
-            setupLayers()
-        }
-
-        required init?(coder: NSCoder) { fatalError() }
-
-        private func setupLayers() {
-            trailLayer.fillColor   = UIColor.clear.cgColor
-            trailLayer.strokeColor = UIColor.systemGreen.cgColor
-            trailLayer.lineWidth   = 2.5
-            trailLayer.lineCap     = .round
-            trailLayer.lineJoin    = .round
-            layer.addSublayer(trailLayer)
-
-            ballLayer.fillColor   = UIColor.systemGreen.withAlphaComponent(0.8).cgColor
-            ballLayer.strokeColor = UIColor.white.cgColor
-            ballLayer.lineWidth   = 1.5
-            layer.addSublayer(ballLayer)
-        }
-
-        func update(points: [CGPoint], ballPosition: CGPoint?, state: TrackingState) {
-            let w = bounds.width
-            let h = bounds.height
-
-            // Trail
-            if points.count >= 2 {
-                let path = UIBezierPath()
-                let mapped = points.map { CGPoint(x: $0.x * w, y: $0.y * h) }
-                path.move(to: mapped[0])
-                for pt in mapped.dropFirst() { path.addLine(to: pt) }
-                trailLayer.path = path.cgPath
-                trailLayer.strokeColor = state == .tracking
-                    ? UIColor.systemGreen.cgColor
-                    : UIColor.systemYellow.cgColor
-            } else {
-                trailLayer.path = nil
-            }
-
-            // Ball indicator
-            if let pos = ballPosition {
-                let cx = pos.x * w
-                let cy = pos.y * h
-                let r: CGFloat = 14
-                ballLayer.path = UIBezierPath(ovalIn: CGRect(x: cx - r, y: cy - r,
-                                                             width: r * 2, height: r * 2)).cgPath
-            } else {
-                ballLayer.path = nil
-            }
-        }
-
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            trailLayer.frame = bounds
-            ballLayer.frame  = bounds
-        }
-    }
-}
-
-#Preview {
-    ShotCaptureView()
-        .environmentObject(ShotStore.shared)
 }

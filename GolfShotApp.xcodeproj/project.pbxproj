@@ -19,6 +19,7 @@
 		B00010 /* ShotHistoryView.swift in Sources */           = {isa = PBXBuildFile; fileRef = A00010; };
 		B00011 /* ClubSelectorView.swift in Sources */          = {isa = PBXBuildFile; fileRef = A00011; };
 		B00012 /* Theme.swift in Sources */                     = {isa = PBXBuildFile; fileRef = A00012; };
+		B00015 /* BallDetector.swift in Sources */              = {isa = PBXBuildFile; fileRef = A00015; };
 		B00013 /* Assets.xcassets in Resources */               = {isa = PBXBuildFile; fileRef = A00013; };
 /* End PBXBuildFile section */
 
@@ -35,6 +36,7 @@
 		A00010 /* ShotHistoryView.swift */     = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShotHistoryView.swift;     sourceTree = "<group>"; };
 		A00011 /* ClubSelectorView.swift */    = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClubSelectorView.swift;    sourceTree = "<group>"; };
 		A00012 /* Theme.swift */               = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift;               sourceTree = "<group>"; };
+		A00015 /* BallDetector.swift */        = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BallDetector.swift;        sourceTree = "<group>"; };
 		A00013 /* Assets.xcassets */           = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets;       sourceTree = "<group>"; };
 		A00014 /* Info.plist */                = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist;                  sourceTree = "<group>"; };
 		PROD01 /* GolfShotApp.app */           = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GolfShotApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -73,6 +75,7 @@
 				A00010,
 				A00011,
 				A00012,
+				A00015,
 				A00013,
 				A00014,
 			);
@@ -138,7 +141,7 @@
 			files = (
 				B00001, B00002, B00003, B00004, B00005,
 				B00006, B00007, B00008, B00009, B00010,
-				B00011, B00012,
+				B00011, B00012, B00015,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
