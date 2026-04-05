@@ -20,7 +20,6 @@
 		B00011 /* ClubSelectorView.swift in Sources */          = {isa = PBXBuildFile; fileRef = A00011; };
 		B00012 /* Theme.swift in Sources */                     = {isa = PBXBuildFile; fileRef = A00012; };
 		B00013 /* Assets.xcassets in Resources */               = {isa = PBXBuildFile; fileRef = A00013; };
-		B00014 /* Info.plist in Resources */                    = {isa = PBXBuildFile; fileRef = A00014; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -127,7 +126,7 @@
 		RESPHASE = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
-			files = (B00013, B00014);
+			files = (B00013);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
