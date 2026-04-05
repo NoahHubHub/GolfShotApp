@@ -132,21 +132,4 @@ struct Shot: Identifiable, Codable {
     }
 }
 
-// MARK: - CodablePoint helper
-
-// CGPoint is not Codable by default when embedded inside arrays stored via JSONEncoder.
-// We store trajectory points as pairs of Double.
-extension CGPoint: @retroactive Codable {
-    public init(from decoder: Decoder) throws {
-        var container = try decoder.unkeyedContainer()
-        let x = try container.decode(Double.self)
-        let y = try container.decode(Double.self)
-        self.init(x: x, y: y)
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.unkeyedContainer()
-        try container.encode(Double(x))
-        try container.encode(Double(y))
-    }
-}
+// CGPoint conforms to Codable natively since iOS 13 / CoreGraphics.

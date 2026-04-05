@@ -35,7 +35,7 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: Frame delivery
 
     /// Called on a background queue with every sample buffer
-    var onFrame: ((CMSampleBuffer) -> Void)?
+    nonisolated(unsafe) var onFrame: ((CMSampleBuffer) -> Void)?
 
     // MARK: - Setup
 
@@ -56,18 +56,16 @@ final class CameraManager: NSObject, ObservableObject {
 
     func start() {
         guard !isRunning else { return }
-        Task.detached(priority: .userInitiated) { [weak self] in
-            self?.session.startRunning()
-            await MainActor.run { self?.isRunning = true }
-        }
+        let s = session
+        Task.detached(priority: .userInitiated) { s.startRunning() }
+        isRunning = true
     }
 
     func stop() {
         guard isRunning else { return }
-        Task.detached(priority: .userInitiated) { [weak self] in
-            self?.session.stopRunning()
-            await MainActor.run { self?.isRunning = false }
-        }
+        let s = session
+        Task.detached(priority: .userInitiated) { s.stopRunning() }
+        isRunning = false
     }
 
     // MARK: - Recording
