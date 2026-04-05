@@ -1,0 +1,53 @@
+name: Build GolfShotApp IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # lets you trigger a build manually from the GitHub UI
+
+jobs:
+  build:
+    runs-on: macos-14   # Apple Silicon runner, ships with Xcode 15
+
+    steps:
+      # ── 1. Check out repo ────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Select Xcode version ──────────────────────────────────────────
+      - name: Select Xcode 15
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      # ── 3. Build & Archive (no real code-signing needed for Sideloadly) ──
+      - name: Archive
+        run: |
+          xcodebuild archive \
+            -project GolfShotApp.xcodeproj \
+            -scheme GolfShotApp \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/GolfShotApp.xcarchive" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            | xcpretty || true
+
+      # ── 4. Package as .ipa ───────────────────────────────────────────────
+      # Sideloadly re-signs the app with your Apple ID, so we just bundle
+      # the .app into a Payload folder and zip it.
+      - name: Create IPA
+        run: |
+          APP_PATH=$(find "$RUNNER_TEMP/GolfShotApp.xcarchive/Products" -name "*.app" | head -1)
+          echo "Found app at: $APP_PATH"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          zip -r GolfShotApp.ipa Payload
+          echo "IPA size: $(du -sh GolfShotApp.ipa | cut -f1)"
+
+      # ── 5. Upload as downloadable artifact ──────────────────────────────
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: GolfShotApp-${{ github.run_number }}
+          path: ${{ runner.temp }}/GolfShotApp.ipa
+          retention-days: 30
