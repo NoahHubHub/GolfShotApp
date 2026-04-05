@@ -6,7 +6,6 @@
 
 import SwiftUI
 import AVFoundation
-import Vision
 import AudioToolbox
 
 // MARK: - CaptureState
@@ -26,7 +25,6 @@ struct ShotCaptureView: View {
 
     @StateObject private var cameraManager = CameraManager()
     @StateObject private var ballDetector  = BallDetector()
-    @StateObject private var ballTracker   = BallTracker()
     @EnvironmentObject var store: ShotStore
 
     @State private var selectedClub: Club       = .driver
@@ -43,7 +41,6 @@ struct ShotCaptureView: View {
 
             DetectionOverlayView(
                 ballDetector: ballDetector,
-                ballTracker:  ballTracker,
                 captureState: captureState
             )
             .ignoresSafeArea()
@@ -67,10 +64,10 @@ struct ShotCaptureView: View {
         .onChange(of: ballDetector.isLocked) { locked in
             if locked && captureState == .ballDetected {
                 withAnimation(.spring()) { captureState = .ballLocked }
-                armTracker()
+                armDetector()
             } else if !locked && captureState == .ballLocked {
                 withAnimation { captureState = .ballDetected }
-                disarmTracker()
+                disarmDetector()
             }
         }
         .onAppear(perform: onAppear)
@@ -213,37 +210,27 @@ struct ShotCaptureView: View {
 
     // MARK: - Shot Logic
 
-    private func armTracker() {
-        ballTracker.startTracking()
-
-        ballTracker.onTrajectoryDetected = { _ in
+    private func armDetector() {
+        ballDetector.onShotDetected = { [self] trajectoryPoints in
             guard captureState == .ballLocked else { return }
-            DispatchQueue.main.async { startRecording() }
-        }
-        ballTracker.onTrajectoryEnded = { points in
-            guard captureState == .shooting else { return }
-            DispatchQueue.main.async { finishShot(trajectoryPoints: points) }
+            startRecording(trajectoryPoints: trajectoryPoints)
         }
     }
 
-    private func disarmTracker() {
-        ballTracker.stopTracking()
-        ballTracker.onTrajectoryDetected = nil
-        ballTracker.onTrajectoryEnded    = nil
+    private func disarmDetector() {
+        ballDetector.onShotDetected = nil
     }
 
-    private func startRecording() {
+    private func startRecording(trajectoryPoints: [CGPoint]) {
         withAnimation { captureState = .shooting }
-        ballDetector.stop()
 
         let filename = "shot_\(UUID().uuidString).mov"
         let url = store.videosDirectory.appendingPathComponent(filename)
         cameraManager.startRecording(to: url)
 
-        // Safety timeout: stop recording after 8 s even if trajectory never ends
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-            guard captureState == .shooting else { return }
-            ballTracker.stopTracking()
+        // Short recording window, then process
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            finishShot(trajectoryPoints: trajectoryPoints)
         }
     }
 
@@ -269,8 +256,9 @@ struct ShotCaptureView: View {
     }
 
     private func resetToSearching() {
+        disarmDetector()
         ballDetector.reset()
-        disarmTracker()
+        ballDetector.startDetecting()
         finishedShot = nil
         withAnimation { captureState = .searching }
     }
@@ -281,9 +269,9 @@ struct ShotCaptureView: View {
         Task {
             await cameraManager.requestPermissionsAndSetup()
             cameraManager.start()
-            cameraManager.onFrame = { [weak ballDetector, weak ballTracker] buffer in
+            ballDetector.startDetecting()
+            cameraManager.onFrame = { [weak ballDetector] buffer in
                 ballDetector?.process(sampleBuffer: buffer)
-                ballTracker?.process(sampleBuffer: buffer)
             }
         }
     }
@@ -301,20 +289,15 @@ struct ShotCaptureView: View {
 struct DetectionOverlayView: UIViewRepresentable {
 
     @ObservedObject var ballDetector: BallDetector
-    @ObservedObject var ballTracker:  BallTracker
     let captureState: CaptureState
 
     func makeUIView(context: Context) -> OverlayCanvas { OverlayCanvas() }
 
     func updateUIView(_ view: OverlayCanvas, context: Context) {
-        let trajectoryPts = ballTracker.latestPoints.map {
-            CGPoint(x: $0.x, y: 1 - $0.y)
-        }
         view.update(
-            detectedBall:      ballDetector.detected,
-            isLocked:          ballDetector.isLocked,
-            trajectoryPoints:  trajectoryPts,
-            captureState:      captureState
+            detectedBall: ballDetector.detected,
+            isLocked:     ballDetector.isLocked,
+            captureState: captureState
         )
     }
 
@@ -360,10 +343,9 @@ struct DetectionOverlayView: UIViewRepresentable {
 
         // MARK: Update
 
-        func update(detectedBall:     DetectedBall?,
-                    isLocked:         Bool,
-                    trajectoryPoints: [CGPoint],
-                    captureState:     CaptureState) {
+        func update(detectedBall: DetectedBall?,
+                    isLocked:     Bool,
+                    captureState: CaptureState) {
 
             let w = bounds.width
             let h = bounds.height
@@ -441,17 +423,8 @@ struct DetectionOverlayView: UIViewRepresentable {
                 ballDotLayer.removeAnimation(forKey: "pulse")
             }
 
-            // ── Trajectory trail ────────────────────────────────────────
-            if trajectoryPoints.count >= 2 &&
-               (captureState == .shooting || captureState == .processing || captureState == .done) {
-
-                let path   = UIBezierPath()
-                let mapped = trajectoryPoints.map { CGPoint(x: $0.x * w, y: $0.y * h) }
-                path.move(to: mapped[0])
-                mapped.dropFirst().forEach { path.addLine(to: $0) }
-                trailLayer.path = path.cgPath
-
-            } else if captureState == .searching || captureState == .ballDetected || captureState == .ballLocked {
+            // ── Trail: cleared when not shooting ───────────────────────
+            if captureState == .searching || captureState == .ballDetected || captureState == .ballLocked {
                 trailLayer.path = nil
             }
         }
